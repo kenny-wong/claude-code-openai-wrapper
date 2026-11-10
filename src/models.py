@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from datetime import datetime
 import uuid
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -57,9 +58,20 @@ class StreamOptions(BaseModel):
     )
 
 
+def forced_model() -> Optional[str]:
+    """Local change: FORCE_MODEL makes every request use one model, whatever the client asks for."""
+    return os.getenv("FORCE_MODEL", "").strip() or None
+
+
 class ChatCompletionRequest(BaseModel):
     model: str = Field(default_factory=get_default_model)
     messages: List[Message]
+
+    @model_validator(mode="after")
+    def apply_forced_model(self):
+        self.model = forced_model() or self.model
+        return self
+
     temperature: Optional[float] = Field(default=1.0, ge=0, le=2)
     top_p: Optional[float] = Field(default=1.0, ge=0, le=1)
     n: Optional[int] = Field(default=1, ge=1)
@@ -77,7 +89,9 @@ class ChatCompletionRequest(BaseModel):
         default=None, description="Optional session ID for conversation continuity"
     )
     enable_tools: Optional[bool] = Field(
-        default=False,
+        # Local change: DEFAULT_ENABLE_TOOLS=true makes tools on unless a request says otherwise.
+        default_factory=lambda: os.getenv("DEFAULT_ENABLE_TOOLS", "false").strip().lower()
+        in ("1", "true", "yes"),
         description="Enable Claude Code tools (Read, Write, Bash, etc.) - disabled by default for OpenAI compatibility",
     )
     stream_options: Optional[StreamOptions] = Field(
@@ -439,6 +453,12 @@ class AnthropicMessagesRequest(BaseModel):
 
     model: str
     messages: List[AnthropicMessage]
+
+    @model_validator(mode="after")
+    def apply_forced_model(self):
+        self.model = forced_model() or self.model
+        return self
+
     max_tokens: int = Field(default=4096, description="Maximum tokens to generate")
     system: Optional[str] = Field(default=None, description="System prompt")
     temperature: Optional[float] = Field(default=1.0, ge=0, le=1)

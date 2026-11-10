@@ -85,6 +85,11 @@ class ClaudeCodeCLI:
                 return False
 
         except Exception as e:
+            # Local change: in a project folder Claude may try a tool first and hit max_turns=1.
+            # That still proves the CLI runs and is logged in, so count it as verified.
+            if "maximum number of turns" in str(e).lower():
+                logger.info("✅ Claude Agent SDK verified (answered, stopped at the 1-turn test limit)")
+                return True
             logger.error(f"Claude Agent SDK verification failed: {e}")
             logger.warning("Please ensure Claude Code is installed and authenticated:")
             logger.warning("  1. Install: npm install -g @anthropic-ai/claude-code")
@@ -122,6 +127,11 @@ class ClaudeCodeCLI:
                 # Set model if specified
                 if model:
                     options.model = model
+
+                # Local change: CLAUDE_EFFORT sets the effort level for every request
+                effort = os.getenv("CLAUDE_EFFORT", "").strip().lower()
+                if effort in ("low", "medium", "high", "xhigh", "max"):
+                    options.effort = effort
 
                 # Set system prompt - CLAUDE AGENT SDK STRUCTURED FORMAT
                 # Use structured format as per SDK documentation

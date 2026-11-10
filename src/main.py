@@ -56,6 +56,7 @@ from src.rate_limiter import (
 from datetime import datetime, timezone
 
 from src import constants
+from src import chat_log
 from src.constants import (
     ANTHROPIC_MODELS_URL,
     ANTHROPIC_VERSION,
@@ -532,6 +533,49 @@ class DebugLoggingMiddleware(BaseHTTPMiddleware):
 app.add_middleware(DebugLoggingMiddleware)
 
 
+class TrafficLogMiddleware(BaseHTTPMiddleware):
+    """Always log /v1/ request bodies and response bodies as single lines (REQ/RES), for monitoring."""
+
+    MAX_CHARS = 4000
+
+    @staticmethod
+    def _clip(text: str, limit: int) -> str:
+        text = text.replace("\r", "").replace("\n", "\\n")
+        return text if len(text) <= limit else text[:limit] + f"... [+{len(text) - limit} chars]"
+
+    async def dispatch(self, request: Request, call_next):
+        if not request.url.path.startswith("/v1/"):
+            return await call_next(request)
+
+        tag = f"{request.method} {request.url.path}"
+        started = asyncio.get_event_loop().time()
+        try:
+            body = await request.body()
+        except Exception:
+            body = b""
+        logger.info(f"[REQ] {tag} {self._clip(body.decode(errors='replace'), self.MAX_CHARS)}")
+
+        response = await call_next(request)
+        chunks = []
+        original = response.body_iterator
+
+        async def tee():
+            async for chunk in original:
+                chunks.append(chunk if isinstance(chunk, bytes) else chunk.encode())
+                yield chunk
+            ms = (asyncio.get_event_loop().time() - started) * 1000
+            text = b"".join(chunks).decode(errors="replace")
+            logger.info(
+                f"[RES] {tag} {response.status_code} {ms:.0f}ms {self._clip(text, self.MAX_CHARS)}"
+            )
+
+        response.body_iterator = tee()
+        return response
+
+
+app.add_middleware(TrafficLogMiddleware)
+
+
 # Custom exception handler for 422 validation errors
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
@@ -777,6 +821,11 @@ async def generate_streaming_response(
                 assistant_message = Message(role="assistant", content=assistant_content)
                 session_manager.add_assistant_response(actual_session_id, assistant_message)
 
+        chat_log.log_exchange(
+            request.messages,
+            MessageAdapter.filter_content(assistant_content) if assistant_content else "",
+        )
+
         # Prepare usage data if requested
         usage_data = None
         if request.stream_options and request.stream_options.include_usage:
@@ -924,6 +973,7 @@ async def chat_completions(
 
             # Filter out tool usage and thinking blocks
             assistant_content = MessageAdapter.filter_content(raw_assistant_content)
+            chat_log.log_exchange(request_body.messages, assistant_content)
 
             # Add assistant response to session if using session mode
             if actual_session_id:
@@ -1032,6 +1082,7 @@ async def anthropic_messages(
 
         # Filter out tool usage and thinking blocks
         assistant_content = MessageAdapter.filter_content(raw_assistant_content)
+        chat_log.log_exchange(request_body.messages, assistant_content)
 
         # Estimate tokens
         prompt_tokens = MessageAdapter.estimate_tokens(prompt)
